@@ -1,0 +1,9 @@
+# 减少构建上下文体积（如需 COPY loganalyzer-*/src，请删除对应行）
+.git
+.gitignore
+hooks/
+multi-arch-manifest.yaml
+*.md
+Dockerfile*
+!Dockerfile
+loganalyzer-4.1.13/

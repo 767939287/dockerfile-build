@@ -6,10 +6,11 @@ name: build-php80
 # 镜像地址：
 #   ghcr.io/<你的用户名>/<仓库名>/php80:<PHP版本>   例 ghcr.io/xxx/dnmp/php80:8.5
 #   ghcr.io/<你的用户名>/<仓库名>/php80:latest
+#   ghcr.io/<你的用户名>/<仓库名>/php80:<PHP版本>-<YYYYMMDD>   每次构建留档
 # 想换地址，可在仓库 Variables 里设置 GHCR_IMAGE（例如 abc/php80）
 #
-# 触发：手动 / 推送到 php80-image / 每周一 03:00(UTC) 定时
-# 版本·扩展·时区·换源 全部在 php80-image/Dockerfile 顶部“配置区”改
+# 触发：手动 / 推送到 php80/ / 每周一 02:00(北京时间) 定时
+# 版本·扩展·时区·换源 全部在 php80/Dockerfile 顶部“配置区”改
 # ============================================================
 
 on:
@@ -22,18 +23,15 @@ on:
   push:
     branches: [main, master]
     paths:
-      - 'php80-image/**'
-      - 'Dockerfile'
-      - '**/Dockerfile'
+      - 'php80/**'
       - '.github/workflows/build-php80.yml'
   pull_request:
     paths:
-      - 'php80-image/**'
-      - 'Dockerfile'
-      - '**/Dockerfile'
+      - 'php80/**'
   schedule:
-    # 每周一 03:00 UTC（北京时间 11:00）自动重建一次
-    - cron: '0 3 * * 1'
+    # 每周一凌晨 02:00 北京时间（= 周日 18:00 UTC）自动重建一次
+    # 注意：GitHub 定时任务在高峰期可能延迟几分钟到半小时才启动
+    - cron: '0 18 * * 0'
 
 # 避免定时和手动同时跑
 concurrency:
@@ -53,22 +51,24 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 定位构建目录并读取 Dockerfile 配置区
+      - name: 校验 php80/Dockerfile 并读取配置区
         id: cfg
         run: |
           set -euo pipefail
 
-          # 兼容两种布局：仓库根目录下带 php80-image/，或 php80-image 本身就是仓库根
-          if [ -f php80-image/Dockerfile ]; then CTX=php80-image; else CTX=.; fi
+          # 约定：php80 的所有文件都放在仓库的 php80/ 目录下，不放仓库根目录
+          CTX=php80
+          [ -f "$CTX/Dockerfile" ] || { echo "ERROR: 找不到 $CTX/Dockerfile（php80 相关文件必须放在 php80/ 目录）"; exit 1; }
           echo "CTX=$CTX" >> "$GITHUB_ENV"
 
           # 镜像名（GHCR 要求全小写）
           image="${GHCR_IMAGE:-ghcr.io/${GITHUB_REPOSITORY,,}/php80}"
           echo "IMAGE=${image,,}" >> "$GITHUB_ENV"
+          echo "DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
 
-          # 从配置区读出 PHP 版本，作为镜像 tag
+          # 从配置区读出 PHP 版本，作为镜像 tag（解析失败则用 rolling，避免与 latest 重复）
           VER="$(sed -n 's|^ARG PHP_VERSION=php:\(.*\)-fpm-alpine$|\1|p' "$CTX/Dockerfile" | head -n 1)"
-          echo "PHP_VER=${VER:-latest}" >> "$GITHUB_ENV"
+          echo "PHP_VER=${VER:-rolling}" >> "$GITHUB_ENV"
 
           if [[ "${PLATFORMS}" == *,* ]]; then
             echo "multi=1" >> "$GITHUB_OUTPUT"
@@ -78,7 +78,7 @@ jobs:
 
           echo "构建目录: $CTX"
           echo "镜像地址: ${image,,}"
-          echo "PHP 版本: ${VER:-latest}"
+          echo "PHP 版本: ${VER:-rolling}"
           echo "目标平台: ${PLATFORMS}"
 
           {
@@ -86,8 +86,8 @@ jobs:
             echo ""
             echo "| 项目 | 值 |"
             echo "| --- | --- |"
-            echo "| 镜像 | \`${image,,}:${VER:-latest}\` |"
-            echo "| 版本 | ${VER:-latest} |"
+            echo "| 镜像 | \`${image,,}:${VER:-rolling}\` |"
+            echo "| 版本 | ${VER:-rolling} |"
             echo "| 平台 | ${PLATFORMS} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -117,6 +117,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ${{ env.IMAGE }}:${{ env.PHP_VER }}
+            ${{ env.IMAGE }}:${{ env.PHP_VER }}-${{ env.DATE }}
             ${{ env.IMAGE }}:latest
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
