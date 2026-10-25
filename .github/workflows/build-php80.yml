@@ -1,0 +1,125 @@
+name: build-php80
+
+# ============================================================
+# 构建 php80 镜像并推送到 GitHub Container Registry (ghcr.io)
+#
+# 镜像地址：
+#   ghcr.io/<你的用户名>/<仓库名>/php80:<PHP版本>   例 ghcr.io/xxx/dnmp/php80:8.5
+#   ghcr.io/<你的用户名>/<仓库名>/php80:latest
+# 想换地址，可在仓库 Variables 里设置 GHCR_IMAGE（例如 abc/php80）
+#
+# 触发：手动 / 推送到 php80-image / 每周一 03:00(UTC) 定时
+# 版本·扩展·时区·换源 全部在 php80-image/Dockerfile 顶部“配置区”改
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: '目标平台（留空=linux/amd64），多架构示例：linux/amd64,linux/arm64'
+        required: false
+        default: ''
+  push:
+    branches: [main, master]
+    paths:
+      - 'php80-image/**'
+      - 'Dockerfile'
+      - '**/Dockerfile'
+      - '.github/workflows/build-php80.yml'
+  pull_request:
+    paths:
+      - 'php80-image/**'
+      - 'Dockerfile'
+      - '**/Dockerfile'
+  schedule:
+    # 每周一 03:00 UTC（北京时间 11:00）自动重建一次
+    - cron: '0 3 * * 1'
+
+# 避免定时和手动同时跑
+concurrency:
+  group: build-php80
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # 推送 ghcr.io 必需
+    env:
+      PLATFORMS: ${{ inputs.platforms || vars.PHP80_PLATFORMS || 'linux/amd64' }}
+      GHCR_IMAGE: ${{ vars.GHCR_IMAGE }}   # 可选，留空则用 ghcr.io/<owner>/<repo>/php80
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 定位构建目录并读取 Dockerfile 配置区
+        id: cfg
+        run: |
+          set -euo pipefail
+
+          # 兼容两种布局：仓库根目录下带 php80-image/，或 php80-image 本身就是仓库根
+          if [ -f php80-image/Dockerfile ]; then CTX=php80-image; else CTX=.; fi
+          echo "CTX=$CTX" >> "$GITHUB_ENV"
+
+          # 镜像名（GHCR 要求全小写）
+          image="${GHCR_IMAGE:-ghcr.io/${GITHUB_REPOSITORY,,}/php80}"
+          echo "IMAGE=${image,,}" >> "$GITHUB_ENV"
+
+          # 从配置区读出 PHP 版本，作为镜像 tag
+          VER="$(sed -n 's|^ARG PHP_VERSION=php:\(.*\)-fpm-alpine$|\1|p' "$CTX/Dockerfile" | head -n 1)"
+          echo "PHP_VER=${VER:-latest}" >> "$GITHUB_ENV"
+
+          if [[ "${PLATFORMS}" == *,* ]]; then
+            echo "multi=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "multi=0" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "构建目录: $CTX"
+          echo "镜像地址: ${image,,}"
+          echo "PHP 版本: ${VER:-latest}"
+          echo "目标平台: ${PLATFORMS}"
+
+          {
+            echo "### php80 镜像构建"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 镜像 | \`${image,,}:${VER:-latest}\` |"
+            echo "| 版本 | ${VER:-latest} |"
+            echo "| 平台 | ${PLATFORMS} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          sed -n '/配 置 区/,/配 置 区 结 束/p' "$CTX/Dockerfile"
+
+      - name: 设置 QEMU（多架构）
+        if: steps.cfg.outputs.multi == '1'
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.CTX }}
+          file: ${{ env.CTX }}/Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.PHP_VER }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}

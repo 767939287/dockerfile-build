@@ -1,0 +1,33 @@
+# ============================================================
+# 独立 php80 服务（只包含 php80，不再依赖根目录 docker-compose.yml）
+# 构建参数不在这里传，全部以 Dockerfile 顶部“配置区”为准。
+#
+# 本地构建并启动：
+#   docker-compose -f docker-compose.yml up -d --build
+#
+# 直接用 CI 构建好的镜像（不构建）：
+#   PHP80_IMAGE=ghcr.io/<owner>/<repo>/php80 PHP80_TAG=latest \
+#     docker-compose -f docker-compose.yml up -d --no-build
+# ============================================================
+
+# 与根目录 compose 使用同一 project，容器/网络可直接互通（dnmp_default）
+name: ${COMPOSE_PROJECT_NAME:-dnmp}
+
+services:
+  php80:
+    image: ${PHP80_IMAGE:-dnmp/php80}:${PHP80_TAG:-latest}
+    build:
+      context: .
+    container_name: php80
+    expose:
+      - 9501
+    volumes:
+      # 相对路径以“本文件所在目录”为基准，所以默认值都带 ../
+      - ${PHP80_SOURCE_DIR:-../www}:/www/:rw
+      - ${PHP80_INI_FILE:-../services/php80/php.ini}:/usr/local/etc/php/php.ini:ro
+      - ${PHP80_FPM_FILE:-../services/php80/php-fpm.conf}:/usr/local/etc/php-fpm.d/www.conf:rw
+      - ${PHP80_LOG_PATH:-../logs/php80}:/var/log/php
+      - ${PHP80_COMPOSER_PATH:-../data/composer}:/tmp/composer
+    restart: always
+    cap_add:
+      - SYS_PTRACE
