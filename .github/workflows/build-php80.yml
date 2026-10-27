@@ -11,6 +11,10 @@ name: build-php80
 #
 # 触发：手动 / 推送到 php80/ / 每周一 02:00(北京时间) 定时
 # 版本·扩展·时区·换源 全部在 php80/Dockerfile 顶部“配置区”改
+#
+# 构建前会比对基础镜像 digest（+ Dockerfile 内容 + 目标平台）：
+#   与上次成功构建一致 -> 跳过构建（不拉不推）
+#   手动触发时填 force=true 可强制重建
 # ============================================================
 
 on:
@@ -20,6 +24,10 @@ on:
         description: '目标平台（留空=linux/amd64），多架构示例：linux/amd64,linux/arm64'
         required: false
         default: ''
+      force:
+        description: '忽略 digest 比对强制重建：true / false'
+        required: false
+        default: 'false'
   push:
     branches: [main, master]
     paths:
@@ -100,8 +108,75 @@ jobs:
       - name: 设置 Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ---------- 构建前检查：基础镜像 digest 未变化则跳过 ----------
+      - name: 解析基础镜像 digest
+        id: base
+        run: |
+          set -euo pipefail
+
+          # 与 tag 解析保持一致，从配置区读取基础镜像
+          BASE="$(sed -n 's|^ARG PHP_VERSION=\(.*\)$|\1|p' "$CTX/Dockerfile" | head -n 1)"
+          BASE="${BASE:-php:8.5-fpm-alpine}"
+
+          DIGEST=""
+          if RAW="$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            DIGEST="$(printf '%s' "$RAW" | tr -d '"')"
+          fi
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::warning::读取 $BASE 的 digest 失败（网络/限流），本次直接构建"
+            DIGEST="unknown-${GITHUB_RUN_ID}"
+          fi
+
+          # 状态 key：基础镜像 digest + 目标平台 + Dockerfile 内容
+          KEY="$( { printf '%s\n' "$DIGEST" "$PLATFORMS"; cat "$CTX/Dockerfile"; } | sha256sum | cut -c1-20 )"
+
+          {
+            echo "BASE_IMAGE=$BASE"
+            echo "BASE_DIGEST=$DIGEST"
+            echo "STATE_KEY=php80-build-state-${KEY}"
+          } >> "$GITHUB_ENV"
+
+          echo "key=php80-build-state-${KEY}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo ""
+            echo "### 基础镜像检查"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 基础镜像 | \`${BASE}\` |"
+            echo "| digest | \`${DIGEST}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 读取上次构建状态
+        id: state
+        uses: actions/cache/restore@v4
+        with:
+          path: .build-state
+          key: ${{ steps.base.outputs.key }}
+
+      - name: 判断是否需要构建
+        id: decide
+        env:
+          FORCE: ${{ inputs.force }}
+          HIT: ${{ steps.state.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          if [ "${FORCE}" = "true" ]; then
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+            REASON="force=true，强制重建"
+          elif [ "${HIT}" = "true" ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            REASON="基础镜像 digest 与 Dockerfile 均未变化 → 跳过构建"
+          else
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+            REASON="基础镜像或 Dockerfile 有变化 → 开始构建"
+          fi
+          echo "$REASON"
+          echo "- $REASON" >> "$GITHUB_STEP_SUMMARY"
+
       - name: 登录 GHCR
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.decide.outputs.skip != '1'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -109,6 +184,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 构建并推送
+        if: steps.decide.outputs.skip != '1'
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.CTX }}
@@ -124,3 +200,19 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      - name: 记录本次构建状态
+        if: steps.decide.outputs.skip != '1' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          mkdir -p .build-state
+          printf 'base=%s\ndigest=%s\nplatforms=%s\nrun=%s\n' \
+            "$BASE_IMAGE" "$BASE_DIGEST" "$PLATFORMS" "$GITHUB_RUN_ID" > .build-state/last-build.txt
+          cat .build-state/last-build.txt
+
+      - name: 保存构建状态（供下次比对）
+        if: steps.decide.outputs.skip != '1' && github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: .build-state
+          key: ${{ steps.base.outputs.key }}

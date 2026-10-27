@@ -93,7 +93,16 @@ compose 支持的环境变量（默认值均相对于本目录）：
 - 推送到 `main` / `master` 且改动 `php80/**` 时
 - PR 中只构建、不推送
 
-手动触发：Actions → `build-php80` → Run workflow，可填 `platforms`（如 `linux/amd64,linux/arm64`）。
+手动触发：Actions → `build-php80` → Run workflow，可填 `platforms`（如 `linux/amd64,linux/arm64`）、`force`（`true` = 忽略 digest 比对强制重建）。
+
+### 构建前检查：基础镜像 digest 未变化则跳过
+
+每次运行会先比对基础镜像（配置区的 `ARG PHP_VERSION`）在 registry 上的 digest：
+
+- digest + `Dockerfile` 内容 + 目标平台 与**上次成功构建**完全一致 → 跳过构建（绿色通过，不推送）
+- 任意一项变化（上游重新发布了该 tag、改了配置区、换了平台）→ 正常构建并推送
+- 上次记录保存在 Actions Cache 里；缓存过期或首次运行时会照常构建（只是少了一次优化）
+- 手动触发时填 `force: true` 可强制重建
 
 产出镜像：`ghcr.io/<owner>/<repo>/php80`
 
